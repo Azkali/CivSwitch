@@ -13,8 +13,8 @@ smoke test, and gadget teardown pass. A ten-line text-mode test at 32 ms hold
 and 32 ms release produced the expected text on the PC. USB timestamps and
 disconnect handling remain to be verified. With the PC cable connected after
 teardown, the UDC reported `configured` even though its function, gadget
-directory and mount were gone; controller-state reporting needs further
-investigation.
+directory and mount were gone. When the PC cable was unplugged, the port
+reported host role and the UDC disappeared from `/sys/class/udc`.
 
 ## Prerequisites and hardware
 
@@ -31,8 +31,10 @@ and util-linux (`mount`, `umount`, `findmnt`, `mountpoint`, `flock`). Python 3
 and ShellCheck are needed only for development checks.
 
 Power the T3 from its usual supply. Connect **OTG port2** to a **normal PC**
-using a data cable. This validation does not involve a console. Select a US
-keyboard layout and turn Caps Lock off on the PC.
+using a data cable before running preflight. On the tested T3 the port switched
+to host role and removed the UDC when the cable was unplugged. This validation
+does not involve a console. Select a US keyboard layout and turn Caps Lock off
+on the PC.
 
 ## Build
 
@@ -200,8 +202,9 @@ Record these results on real hardware before closing the adaptation task:
    and timing. Use PC USB capture timestamps (`usbmon`/Wireshark) for measured
    hold/release intervals; `dmesg` alone establishes enumeration, not timing.
 5. Disconnect and Ctrl-C stop typing without automatic replay. Teardown leaves
-   no gadget or FunctionFS mount, and the UDC state is `not attached` when
-   disconnected from the PC.
+   no gadget or FunctionFS mount. On the tested T3, after unplugging the PC the
+   port switched to host role and the UDC disappeared instead of reporting
+   `not attached`.
 
 References: [Pico generator](https://github.com/Gezine/CivSwitch/blob/main/PicoSwitch/tools/payload_to_macro.py),
 [MacroEngine](https://github.com/Gezine/CivSwitch/blob/main/PicoSwitch/include/MacroEngine.h),
