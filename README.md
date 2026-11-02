@@ -3,11 +3,18 @@
 XSS toolchain for the Switch 1 edition of Civilization 7.  
 Only the **1.0.0** version of the game in physical cartridge is supported.  
 
-Tested at Switch 1 fw 22.5.0, Switch 2 fw 20.4.0 and 23.0.1 using pi pico 2 (RP2350)  
-pi pico 1 (RP2040) is untested.  
+The Pico-based workflow has been tested at Switch 1 firmware 22.5.0 and
+Switch 2 firmware 20.4.0 and 23.0.1 with a Pico 2 (RP2350). Pico 1 (RP2040)
+is untested. T3Switch has been tested as a USB keyboard against a normal PC;
+its console workflow has not been tested.
 
-Two components:
+Components:
 
+- **T3Switch** — a Linux FunctionFS USB keyboard for the XpressReal T3. It
+  types a user-supplied file using the Pico macro's key map, timings and batch
+  structure. It does not build or interpret the file. Gamepad A presses are
+  logged as placeholders, so it is not yet a verified replacement for the
+  Pico controller. See [T3Switch/README.md](T3Switch/README.md).
 - **PicoSwitch** — clean, compilable Pico firmware (RP2040 + RP2350) that types a chat-XSS payload into the Switch (USB HID macro).
 
   Default payload = the Remote JS Loader bootstrap (exploit core + TCP loader).
@@ -17,9 +24,35 @@ Two components:
 
 ## Layout
 
-`core.js` at the root is the shared payload both components build from, and `send_js.py` at the root sends any payload to a running loader.
+`core.js` at the root is the shared payload used by PicoSwitch and the installer
+creator. `send_js.py` sends a payload to a running loader. T3Switch reads an
+existing file and does not generate a payload.
 
-## Workflow
+## T3 keyboard setup
+
+Connect the T3's **OTG port2** to a normal PC with a data cable, then build
+and run the keyboard test on the T3:
+
+```sh
+cd T3Switch
+make
+sudo tools/check-t3.sh
+sudo scripts/hid-gadget-up.sh
+printf 'hello world\n' > /tmp/hello.txt
+sudo ./hidkbd_ffs --payload /tmp/hello.txt --mode text --cps 20 --start-delay-ms 5000
+sudo scripts/hid-gadget-down.sh
+```
+
+Focus a text editor on the PC during the five-second delay. It should receive
+`hello world` followed by a newline. This PC smoke test and a ten-line mixed
+case and punctuation test passed on the T3. The default Pico-style mode sends
+Esc and two Enter presses per nonempty line; `--mode text` is used above for
+plain text. Actual gamepad A presses are not implemented, so the default mode
+only logs where they would occur. USB packet timing and disconnect during
+typing remain unverified. See the [T3Switch guide](T3Switch/README.md) for
+prerequisites, options, timing and teardown behavior.
+
+## Pico workflow
 
 1. **Build + flash** the loader UF2 (see PicoSwitch/README.md).
 
