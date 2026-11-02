@@ -9,10 +9,12 @@ module, or dependency beyond libc and Linux UAPI headers.
 **Validation status:** the fork's Pico source and MIT license were checked.
 The host build, typing and control tests, ShellCheck, fork parity, native T3
 build and tests, root preflight, PC USB enumeration and the `hello world` text
-smoke test, and gadget teardown pass. Physical timing and disconnect handling
-remain to be verified. With the PC cable connected after teardown, the UDC
-reported `configured` even though its function, gadget directory and mount were
-gone; controller-state reporting needs further investigation.
+smoke test, and gadget teardown pass. A ten-line text-mode test at 32 ms hold
+and 32 ms release produced the expected text on the PC. USB timestamps and
+disconnect handling remain to be verified. With the PC cable connected after
+teardown, the UDC reported `configured` even though its function, gadget
+directory and mount were gone; controller-state reporting needs further
+investigation.
 
 ## Prerequisites and hardware
 
