@@ -7,10 +7,10 @@ or interpret the file's contents. There is no Pico, kernel rebuild, HID gadget
 module, or dependency beyond libc and Linux UAPI headers.
 
 **Validation status:** the fork's Pico source and MIT license were checked.
-The host build, typing and control tests, ShellCheck, fork parity, and native
-T3 build and tests pass. Root preflight requires the
-T3 user's sudo password; PC USB enumeration, typing/timing, and teardown await
-the normal PC hardware hookup.
+The host build, typing and control tests, ShellCheck, fork parity, native T3
+build and tests, root preflight, and unbound setup and teardown pass. PC USB
+enumeration, typing/timing, and teardown after a bound session await the normal
+PC hardware hookup.
 
 ## Prerequisites and hardware
 
