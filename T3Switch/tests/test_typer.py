@@ -42,7 +42,7 @@ class TyperTests(unittest.TestCase):
         steps, result = run(b"hello world\n", "--mode", "text", "--cps", "20")
         self.assertEqual(decode(steps), "hello world\n")
         self.assertNotIn("pad-A", result.stderr)
-        self.assertEqual([s["ms"] for s in steps[1:-1]], [32, 18] * 12)
+        self.assertEqual([s["ms"] for s in steps[1:-1]], [40, 10] * 12)
 
     def test_full_us_map(self):
         data = bytes(range(32, 127)) + b"\t"
@@ -52,7 +52,7 @@ class TyperTests(unittest.TestCase):
     def test_pico_batches(self):
         steps, result = run(b"aA!\n\n  \nBb\r\n")
         self.assertEqual(decode(steps), "\x1baA!\n\n\x1bBb\n\n")
-        self.assertEqual(result.stderr.count("TODO: pad-A"), 8)
+        self.assertEqual(sum(s["kind"] == "pad-A" for s in steps), 8)
         self.assertEqual(steps[0]["ms"], 1000)
         self.assertEqual(steps[-1], {"kind": "report", "ms": 0, "report": "0000000000000000"})
 
@@ -61,10 +61,10 @@ class TyperTests(unittest.TestCase):
         # start delay + ten preamble steps + Esc, WAIT, PAD, WAIT
         keys = steps[15:]
         self.assertEqual([(s["report"], s["ms"]) for s in keys[:7]], [
-            ("0000040000000000", 32), ("0000050000000000", 32),
-            ("0000000000000000", 32), ("0200050000000000", 32),
-            ("0000060000000000", 32), ("0000000000000000", 32),
-            ("0000060000000000", 32)])
+            ("0000040000000000", 40), ("0000050000000000", 40),
+            ("0000000000000000", 40), ("0200050000000000", 40),
+            ("0000060000000000", 40), ("0000000000000000", 40),
+            ("0000060000000000", 40)])
 
     def test_unknown_bytes(self):
         steps, result = run(b"a\x00\xff\xc3\xa9b", "--mode", "text")
@@ -72,12 +72,12 @@ class TyperTests(unittest.TestCase):
         self.assertEqual(result.stderr.count("skipping unsupported byte"), 4)
         steps, result = run(b"\xff\nabc\n\x00")
         self.assertEqual(decode(steps), "\x1babc\n\n")
-        self.assertEqual(result.stderr.count("TODO: pad-A"), 6)
+        self.assertEqual(sum(s["kind"] == "pad-A" for s in steps), 6)
 
     def test_empty_input(self):
         steps, result = run(b"")
         self.assertEqual(decode(steps), "")
-        self.assertEqual(result.stderr.count("TODO: pad-A"), 5)
+        self.assertEqual(sum(s["kind"] == "pad-A" for s in steps), 5)
 
     def test_newlines(self):
         for mode in ("enter", "cr"):

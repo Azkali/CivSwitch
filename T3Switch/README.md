@@ -1,20 +1,25 @@
-# T3Switch: FunctionFS USB keyboard
+# T3Switch: FunctionFS USB keyboard + gamepad
 
 T3Switch types an opaque, user-supplied file through an XpressReal T3's USB
-device port. It presents a USB HID boot keyboard with eight-byte input reports,
-a 63-byte report descriptor, and a US QWERTY map. It does not fetch, generate,
-or interpret the file's contents. There is no Pico, kernel rebuild, HID gadget
+device port. It presents a composite HORIPAD (0x0f0d:0x0092): a Switch gamepad
+interface and a US-QWERTY HID boot keyboard, both with eight-byte reports. It
+drives the Civ7 chat bootstrap by interleaving keyboard typing with real
+gamepad A presses, the way the Pico does. It does not fetch, generate, or
+interpret the file's contents. There is no Pico, kernel rebuild, HID gadget
 module, or dependency beyond libc and Linux UAPI headers.
 
 **Validation status:** the fork's Pico source and MIT license were checked.
-The host build, typing and control tests, ShellCheck, fork parity, native T3
-build and tests, root preflight, PC USB enumeration and the `hello world` text
-smoke test, and gadget teardown pass. A ten-line text-mode test at 32 ms hold
-and 32 ms release produced the expected text on the PC. USB timestamps and
-disconnect handling remain to be verified. With the PC cable connected after
-teardown, the UDC reported `configured` even though its function, gadget
-directory and mount were gone. When the PC cable was unplugged, the port
-reported host role and the UDC disappeared from `/sys/class/udc`.
+The host build, fork parity, native T3 build, and ShellCheck pass with the
+composite gamepad added. Earlier keyboard-only runs (PC USB enumeration, the
+`hello world` and ten-line text smoke tests, root preflight, gadget teardown)
+passed before the gadget became a composite controller. USB timestamps and
+disconnect handling remain to be verified. Still outstanding on hardware: the
+composite HORIPAD gadget enumerating on a PC, and — the real goal — the
+gamepad A presses driving the Civ7 chat bootstrap on the Switch 2 end to end.
+With the PC cable connected after teardown, the UDC reported `configured` even
+though its function, gadget directory and mount were gone. When the PC cable
+was unplugged, the port reported host role and the UDC disappeared from
+`/sys/class/udc`.
 
 ## Prerequisites and hardware
 
@@ -119,24 +124,26 @@ hidkbd_ffs --payload FILE [--cps N] [--press-ms N]
 ```
 
 Default `pico` mode applies the macro's presentation steps to each nonempty
-line: five preamble A placeholders; Esc, A placeholder, line, Enter twice;
-then an A placeholder between batches. Every placeholder logs `TODO: pad-A`,
-holds a released keyboard for 50 ms, and preserves the following wait. It never
-sends a keyboard `A` in place of a gamepad button.
+line: five preamble A presses; Esc, A, line, Enter twice; then an A press
+between batches. Each A step presses the gamepad A button (`SWITCH_PAD_MASK_A`)
+for 50 ms and releases it to neutral, then preserves the following wait. The
+keyboard and gamepad are two interfaces of one composite HORIPAD gadget, so A
+is a real controller button, not a keyboard key.
 
 | Constant | Milliseconds / count |
 | --- | ---: |
-| KEY_HOLD_MS / KEY_GAP_MS | 32 / 32 |
-| ENTER_HOLD_MS / ENTER_GAP_MS | 32 / 200 |
-| PRE_A_WAIT_MS / POST_A_WAIT_MS | 750 / 550 |
-| PREAMBLE_A_COUNT / PREAMBLE_GAP_MS | 5 / 550 |
-| ESC_TO_A_WAIT_MS / A_PRESS_MS | 750 / 50 |
+| KEY_HOLD_MS / KEY_GAP_MS | 40 / 40 |
+| ENTER_HOLD_MS / ENTER_GAP_MS | 40 / 200 |
+| PRE_A_WAIT_MS / POST_A_WAIT_MS | 800 / 1200 |
+| PREAMBLE_A_COUNT / PREAMBLE_GAP_MS | 5 / 800 |
+| ESC_TO_A_WAIT_MS / A_PRESS_MS | 800 / 50 |
 | MACRO_START_DELAY_MS | 1000 |
 
-The referenced generator sends different usages back to back. A 32 ms release
+The referenced generator sends different usages back to back. A 40 ms release
 is inserted between consecutive equal usages, including case changes on the
-same physical key. It does **not** insert a gap after every character. WAIT,
-PAD and END release the keyboard; KEYS replaces the entire report. The second
+same physical key. It does **not** insert a gap after every character. WAIT and
+END release the keyboard; PAD presses then releases the gamepad; KEYS replaces
+the entire keyboard report. The second
 Enter has no trailing gap beyond the next macro step. Timing starts when the
 report transfer completes, so USB polling and Linux scheduling add overhead.
 Dry-run parity is not proof of physical timing parity.
@@ -151,7 +158,7 @@ two batch-ending Enters in Pico mode.
 `--cps` accepts integers 1–500 and sets a per-character hold/release period to
 `ceil(1000/N)` milliseconds. It inserts a release after every payload character
 in either mode. The period must exceed the hold by at least 1 ms; for example,
-20 cps with the default hold means 32 ms down and 18 ms released. This is a
+20 cps with the default hold means 40 ms down and 10 ms released. This is a
 pacing override, not parity mode. Special Pico waits and Enter timings remain
 unchanged. `--press-ms` accepts 1–60000 and changes payload-key and Esc holds;
 `--start-delay-ms` accepts 0–3600000 and starts after USB enablement.
@@ -169,23 +176,33 @@ typed text through its key usages; store them like the input file.
 
 ## Control transfers and failure behavior
 
-The HID interface supports report/HID descriptors, GET_REPORT for input and LED
-output, SET_REPORT for LED output, GET/SET_IDLE, and GET/SET_PROTOCOL. Boot and
-report protocols share the eight-byte layout. A nonzero idle rate resends the
-current report at the requested interval during waits. Unsupported requests
-stall ep0. LED reports are accepted but do not change the keymap.
+The gadget exposes two HID interfaces: interface 0 is the Switch gamepad
+(interrupt IN + OUT, eight-byte report), interface 1 is the boot keyboard
+(interrupt IN, eight-byte report). Control requests are routed by interface in
+`wIndex`. Both serve their report/HID descriptors and GET_REPORT for input; the
+keyboard also serves LED GET/SET_REPORT, GET/SET_IDLE, and GET/SET_PROTOCOL
+(boot and report protocols share the eight-byte layout). A nonzero keyboard
+idle rate resends the current report at the requested interval during waits.
+Gamepad output reports over ep0 are accepted and discarded; the declared
+gamepad OUT endpoint is not read. Unsupported requests stall ep0.
 
 Disconnect, suspend, endpoint errors, timeout, or SIGINT/SIGTERM/SIGHUP abort
 playback and unbind the gadget. There is no automatic replay after reconnection;
-restart only after restoring the editor's intended state. Kernel AIO keeps ep1
-writes from blocking ep0 processing. A final release is sent on normal completion;
-on failure, unbinding removes the keyboard and clears the host's device state.
+restart only after restoring the editor's intended state. Kernel AIO keeps the
+interrupt-IN writes from blocking ep0 processing. A final release is sent on
+normal completion; on failure, unbinding removes the gadget and clears the
+host's device state.
 
 ## Limitations and remaining hardware validation
 
-Gamepad A is not implemented. If bootstrap requires real pad presses, a later
-chunk must add a composite keyboard plus Switch USB controller. This version
-alone must not be described as a verified bootstrap replacement.
+Gamepad A is implemented as a composite HORIPAD (0x0f0d:0x0092) interface and
+passes the offline checks (host and native T3 build, fork parity, ShellCheck).
+It has **not** yet been validated on hardware: the composite must be shown to
+enumerate on a PC, and the A presses must be shown to drive the Civ7 chat
+bootstrap on the Switch 2 end to end. Until both pass on-device, this is not a
+verified bootstrap replacement. The gadget is always composite now; a PC
+typing smoke test still works through its keyboard interface (the PC also sees
+an idle gamepad), and `text` mode omits the pad steps entirely.
 
 Only US QWERTY, one key plus modifiers, USB full/high speed, and a self-powered
 T3 are described. The gadget's maximum speed is explicitly high speed because

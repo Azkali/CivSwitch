@@ -9,9 +9,11 @@ udc_free
 [ ! -e "$GADGET" ] || die "$GADGET already exists; run hid-gadget-down.sh first"
 [ ! -e "$FFS" ] || die "$FFS already exists; inspect it or run hid-gadget-down.sh first"
 
-# Prototype IDs; callers with an assigned pair can override both.
-USB_VID=${USB_VID:-0x1d6b}
-USB_PID=${USB_PID:-0x0104}
+# HORIPAD (0x0f0d:0x0092): the simple USB Switch controller the Pico emulates.
+# It speaks plain HID input reports with no Nintendo handshake, so the console
+# accepts its A presses. Callers may override, but the console keys off this pair.
+USB_VID=${USB_VID:-0x0f0d}
+USB_PID=${USB_PID:-0x0092}
 for value in "$USB_VID" "$USB_PID"; do
     case "$value" in
         0x[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) ;;
@@ -42,15 +44,17 @@ printf '0\n' > "$GADGET/bDeviceProtocol"
 printf '64\n' > "$GADGET/bMaxPacketSize0"
 printf 'high-speed\n' > "$GADGET/max_speed"
 mkdir "$GADGET/strings/0x409"
+# Mirror the Pico HORIPAD strings; the console recognizes the pad by VID/PID
+# and descriptors, so these are cosmetic but kept faithful for debugging.
 printf 'T3Switch-001\n' > "$GADGET/strings/0x409/serialnumber"
-printf 'T3Switch\n' > "$GADGET/strings/0x409/manufacturer"
-printf 'T3Switch FunctionFS keyboard\n' > "$GADGET/strings/0x409/product"
+printf 'PICO SWITCH PRO.\n' > "$GADGET/strings/0x409/manufacturer"
+printf 'J24 CONTROLLER\n' > "$GADGET/strings/0x409/product"
 mkdir "$GADGET/configs/c.1"
-# T3 uses its own power supply; no remote wakeup is advertised.
-printf '0xc0\n' > "$GADGET/configs/c.1/bmAttributes"
-printf '0\n' > "$GADGET/configs/c.1/MaxPower"
+# Mirror the HORIPAD configuration: bus-powered, 500 mA, no remote wakeup.
+printf '0x80\n' > "$GADGET/configs/c.1/bmAttributes"
+printf '500\n' > "$GADGET/configs/c.1/MaxPower"
 mkdir "$GADGET/configs/c.1/strings/0x409"
-printf 'Boot keyboard\n' > "$GADGET/configs/c.1/strings/0x409/configuration"
+printf 'Gamepad + keyboard\n' > "$GADGET/configs/c.1/strings/0x409/configuration"
 mkdir "$GADGET/functions/ffs.hidkbd"
 ln -s "$GADGET/functions/ffs.hidkbd" "$GADGET/configs/c.1/ffs.hidkbd"
 mkdir "$FFS"

@@ -30,10 +30,10 @@
 #define MAX_PAYLOAD (16U * 1024U * 1024U)
 
 struct device {
-    int ep0, ep1, event, udc, lock;
+    int ep0, ep_gp, ep_gp_out, ep_kbd, event, udc, lock;
     aio_context_t aio;
     struct iocb request;
-    uint8_t report[8], idle, protocol, leds;
+    uint8_t kbd_report[8], pad_report[8], idle, protocol, leds;
     bool enabled, started, bound, pending, failed;
     uint64_t last_report;
 };
@@ -65,50 +65,71 @@ static int stall(struct device *d, const struct usb_ctrlrequest *s)
     return n < 0 ? -1 : 0;
 }
 
+/* Discard a host OUT data stage of wLength bytes over ep0, then ACK. */
+static int drain_out(struct device *d, unsigned length)
+{
+    uint8_t buffer[64];
+    while (length) {
+        unsigned chunk = length < sizeof(buffer) ? length : sizeof(buffer);
+        ssize_t n = read(d->ep0, buffer, chunk);
+        if (n <= 0) { if (n >= 0) errno = EPROTO; return -1; }
+        length -= (unsigned)n;
+    }
+    return 0;
+}
+
 static int control(struct device *d, const struct usb_ctrlrequest *s)
 {
     const unsigned value = le16toh(s->wValue), length = le16toh(s->wLength);
+    const unsigned iface = le16toh(s->wIndex);
+    const bool keyboard = iface == 1; /* itf0 = gamepad, itf1 = keyboard */
     const void *reply = NULL;
     size_t reply_len = 0;
     uint8_t byte = 0;
-    if (le16toh(s->wIndex) != 0) return stall(d, s);
+    if (iface > 1) return stall(d, s);
     if (s->bRequestType == (USB_DIR_IN | USB_RECIP_INTERFACE) &&
         s->bRequest == USB_REQ_GET_DESCRIPTOR && !(value & 0xff)) {
-        if (value >> 8 == 0x22) { reply = report_descriptor; reply_len = sizeof(report_descriptor); }
-        else if (value >> 8 == 0x21) { reply = hid_descriptor; reply_len = sizeof(hid_descriptor); }
-        else return stall(d, s);
+        if (value >> 8 == 0x22) {
+            reply = keyboard ? kbd_report_descriptor : pad_report_descriptor;
+            reply_len = keyboard ? sizeof(kbd_report_descriptor) : sizeof(pad_report_descriptor);
+        } else if (value >> 8 == 0x21) {
+            reply = keyboard ? kbd_hid_descriptor : pad_hid_descriptor;
+            reply_len = keyboard ? sizeof(kbd_hid_descriptor) : sizeof(pad_hid_descriptor);
+        } else return stall(d, s);
     } else if (s->bRequestType == (USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE)) {
         switch (s->bRequest) {
-        case 0x01: /* GET_REPORT: report ID zero, input or LED output */
-            if (value == 0x0100) { reply = d->report; reply_len = 8; }
-            else if (value == 0x0200) { reply = &d->leds; reply_len = 1; }
+        case 0x01: /* GET_REPORT: input report, or keyboard LED output */
+            if (value == 0x0100) { reply = keyboard ? d->kbd_report : d->pad_report; reply_len = 8; }
+            else if (value == 0x0200 && keyboard) { reply = &d->leds; reply_len = 1; }
             else return stall(d, s);
             break;
         case 0x02: /* GET_IDLE */
             if (value || length != 1) return stall(d, s);
             reply = &d->idle; reply_len = 1; break;
-        case 0x03: /* GET_PROTOCOL */
-            if (value || length != 1) return stall(d, s);
+        case 0x03: /* GET_PROTOCOL: boot keyboard only */
+            if (!keyboard || value || length != 1) return stall(d, s);
             reply = &d->protocol; reply_len = 1; break;
         default: return stall(d, s);
         }
     } else if (s->bRequestType == (USB_TYPE_CLASS | USB_RECIP_INTERFACE)) {
         switch (s->bRequest) {
-        case 0x09: /* SET_REPORT: one-byte LED output, no interrupt OUT endpoint */
-            if (value != 0x0200 || length != 1) return stall(d, s);
-            {
+        case 0x09: /* SET_REPORT */
+            if (keyboard) { /* one-byte LED output, no interrupt OUT endpoint */
+                if (value != 0x0200 || length != 1) return stall(d, s);
                 ssize_t n = read(d->ep0, &byte, 1);
                 if (n != 1) { if (n >= 0) errno = EPROTO; return -1; }
+                d->leds = byte & 0x1f;
+                return 0;
             }
-            d->leds = byte & 0x1f;
-            return 0;
-        case 0x0a: /* SET_IDLE: duration in 4 ms units */
+            /* Gamepad output report over ep0: accept and discard. */
+            return drain_out(d, length);
+        case 0x0a: /* SET_IDLE: duration in 4 ms units; actioned for keyboard */
             if ((value & 0xff) || length) return stall(d, s);
             if (read(d->ep0, &byte, 0) < 0) return -1;
-            d->idle = (uint8_t)(value >> 8);
+            if (keyboard) d->idle = (uint8_t)(value >> 8);
             return 0;
         case 0x0b: /* SET_PROTOCOL: boot (0) and report (1) both use 8 bytes */
-            if (value > 1 || length) return stall(d, s);
+            if (!keyboard || value > 1 || length) return stall(d, s);
             if (read(d->ep0, &byte, 0) < 0) return -1;
             d->protocol = (uint8_t)value;
             return 0;
@@ -144,7 +165,8 @@ static int service(struct device *d, int timeout)
         case FUNCTIONFS_ENABLE:
             d->enabled = true;
             d->protocol = 1; d->idle = 0; d->leds = 0;
-            fprintf(stderr, "USB keyboard enabled\n"); break;
+            switch_pad_report(d->pad_report, 0);
+            fprintf(stderr, "USB composite (gamepad + keyboard) enabled\n"); break;
         case FUNCTIONFS_DISABLE:
         case FUNCTIONFS_UNBIND:
         case FUNCTIONFS_SUSPEND:
@@ -176,14 +198,15 @@ static int service(struct device *d, int timeout)
     return interrupted || d->failed ? -1 : 0;
 }
 
-static int send_report(struct device *d, const uint8_t report[8])
+/* stable is the per-endpoint buffer the in-flight AIO keeps referencing. */
+static int send_report(struct device *d, int fd, uint8_t stable[8], const uint8_t src[8])
 {
     if (!d->enabled || d->pending || interrupted) return -1;
-    memmove(d->report, report, 8); /* idle retransmits may reference this buffer */
+    memmove(stable, src, 8);
     memset(&d->request, 0, sizeof(d->request));
     d->request.aio_lio_opcode = IOCB_CMD_PWRITE;
-    d->request.aio_fildes = (uint32_t)d->ep1;
-    d->request.aio_buf = (uint64_t)(uintptr_t)d->report;
+    d->request.aio_fildes = (uint32_t)fd;
+    d->request.aio_buf = (uint64_t)(uintptr_t)stable;
     d->request.aio_nbytes = 8;
     d->request.aio_flags = IOCB_FLAG_RESFD;
     d->request.aio_resfd = (uint32_t)d->event;
@@ -209,7 +232,7 @@ static int hold(struct device *d, unsigned duration)
         if (d->idle) {
             uint64_t idle_at = d->last_report + (unsigned)d->idle * 4;
             if (now >= idle_at) {
-                if (send_report(d, d->report)) return -1;
+                if (send_report(d, d->ep_kbd, d->kbd_report, d->kbd_report)) return -1;
                 continue;
             }
             if (idle_at < next) next = idle_at;
@@ -221,8 +244,16 @@ static int hold(struct device *d, unsigned duration)
 static int play_step(void *ctx, const uint8_t report[8], unsigned duration, bool pad)
 {
     struct device *d = ctx;
-    if (pad) fprintf(stderr, "TODO: pad-A (%u ms; keyboard released)\n", duration);
-    if (send_report(d, report)) return -1;
+    if (pad) {
+        /* Press A on the gamepad for the hold, then release to neutral. */
+        uint8_t pressed[8], neutral[8];
+        switch_pad_report(pressed, SWITCH_PAD_MASK_A);
+        switch_pad_report(neutral, 0);
+        if (send_report(d, d->ep_gp, d->pad_report, pressed)) return -1;
+        if (hold(d, duration)) return -1;
+        return send_report(d, d->ep_gp, d->pad_report, neutral);
+    }
+    if (send_report(d, d->ep_kbd, d->kbd_report, report)) return -1;
     return hold(d, duration);
 }
 
@@ -230,7 +261,6 @@ static int trace_step(void *ctx, const uint8_t report[8], unsigned duration, boo
 {
     (void)ctx;
     if (interrupted) return -1;
-    if (pad) fprintf(stderr, "TODO: pad-A (%u ms; keyboard released)\n", duration);
     printf("{\"kind\":\"%s\",\"ms\":%u,\"report\":\"", pad ? "pad-A" : "report", duration);
     for (unsigned i = 0; i < 8; ++i) printf("%02x", report[i]);
     puts("\"}");
@@ -258,8 +288,16 @@ static int configure(struct device *d)
         exact_write(d->ep0, ffs_strings, sizeof(ffs_strings))) {
         perror("write FunctionFS descriptors/strings"); return -1;
     }
-    d->ep1 = open(FFS_DIR "/ep1", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
-    if (d->ep1 < 0) { perror("open ep1"); return -1; }
+    /* Endpoints land in descriptor order: ep1 gamepad IN, ep2 gamepad OUT,
+     * ep3 keyboard IN. Open all three so FunctionFS enables the function;
+     * the gamepad OUT endpoint is declared for descriptor fidelity but never
+     * read (the chat bootstrap only presses A). */
+    d->ep_gp = open(FFS_DIR "/ep1", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    if (d->ep_gp < 0) { perror("open ep1 (gamepad IN)"); return -1; }
+    d->ep_gp_out = open(FFS_DIR "/ep2", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (d->ep_gp_out < 0) { perror("open ep2 (gamepad OUT)"); return -1; }
+    d->ep_kbd = open(FFS_DIR "/ep3", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    if (d->ep_kbd < 0) { perror("open ep3 (keyboard IN)"); return -1; }
     d->event = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     if (d->event < 0 || syscall(SYS_io_setup, 1U, &d->aio)) {
         perror("initialize Linux native AIO (CONFIG_AIO required)"); return -1;
@@ -290,7 +328,9 @@ static int cleanup(struct device *d)
         }
     }
     if (d->aio && syscall(SYS_io_destroy, d->aio)) { perror("io_destroy"); result = -1; }
-    if (d->ep1 >= 0) close(d->ep1);
+    if (d->ep_kbd >= 0) close(d->ep_kbd);
+    if (d->ep_gp_out >= 0) close(d->ep_gp_out);
+    if (d->ep_gp >= 0) close(d->ep_gp);
     if (d->ep0 >= 0) close(d->ep0);
     if (d->event >= 0) close(d->event);
     if (d->udc >= 0) close(d->udc);
@@ -303,7 +343,7 @@ static void usage(FILE *out)
     fputs("Usage: hidkbd_ffs --payload FILE [--cps N] [--press-ms N]\n"
           "       [--start-delay-ms N] [--newline enter|cr|none]\n"
           "       [--mode pico|text] [--dry-run]\n"
-          "Default: Pico batch sequence; pad-A is logged, never sent.\n"
+          "Default: Pico batch sequence; pad-A presses A on the gamepad.\n"
           "--mode text emits plain text for the PC smoke test.\n"
           "--cps 1..500 sets a press+release period (ceil(1000/N) ms);\n"
           "  period must exceed --press-ms. Enter/cr are aliases for HID Enter.\n"
@@ -389,7 +429,8 @@ int main(int argc, char **argv)
         result = type_payload(data, size, &options, trace_step, NULL);
         if (fflush(stdout)) result = -1;
     } else {
-        struct device d = {.ep0 = -1, .ep1 = -1, .event = -1, .udc = -1, .lock = -1, .protocol = 1};
+        struct device d = {.ep0 = -1, .ep_gp = -1, .ep_gp_out = -1, .ep_kbd = -1,
+                           .event = -1, .udc = -1, .lock = -1, .protocol = 1};
         result = configure(&d);
         if (!result) result = type_payload(data, size, &options, play_step, &d);
         if (cleanup(&d)) result = -1;
