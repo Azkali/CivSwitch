@@ -26,8 +26,10 @@ static const uint8_t ffs_descriptors[] = {
     3,0,0,0,                         /* FunctionFS v2 */
     134,0,0,0,                       /* total bytes */
     3,0,0,0,                         /* HAS_FS_DESC | HAS_HS_DESC */
-
     7,0,0,0,                         /* FS descriptor count */
+    7,0,0,0,                         /* HS descriptor count */
+
+    /* FS descriptors */
     9,4,0,0,2,3,0,0,0,              /* itf0: HID gamepad, 2 endpoints */
     9,0x21,0x11,0x01,0,1,0x22,86,0,
     7,5,0x81,3,64,0,1,              /* gamepad interrupt IN, 64 bytes, 1 ms */
@@ -36,7 +38,7 @@ static const uint8_t ffs_descriptors[] = {
     9,0x21,0x11,0x01,0,1,0x22,63,0,
     7,5,0x83,3,8,0,1,              /* keyboard interrupt IN, 8 bytes, 1 ms */
 
-    7,0,0,0,                         /* HS descriptor count */
+    /* HS descriptors */
     9,4,0,0,2,3,0,0,0,
     9,0x21,0x11,0x01,0,1,0x22,86,0,
     7,5,0x81,3,64,0,4,              /* 2^(4-1) * 125 us = 1 ms */

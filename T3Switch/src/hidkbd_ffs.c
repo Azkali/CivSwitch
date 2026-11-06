@@ -27,6 +27,10 @@
 #define LOCK_PATH "/run/lock/t3-hidkbd.lock"
 #define IO_TIMEOUT_MS 5000
 #define ENUM_TIMEOUT_MS 30000
+/* The console flushes endpoints while it sets up the controller after
+ * SET_CONFIGURATION; tolerate ESHUTDOWN on the IN endpoints this long. */
+#define EP_SETTLE_MS 1500
+#define EP_RETRY_MS 15
 #define MAX_PAYLOAD (16U * 1024U * 1024U)
 
 struct device {
@@ -35,7 +39,8 @@ struct device {
     struct iocb request;
     uint8_t kbd_report[8], pad_report[8], idle, protocol, leds;
     bool enabled, started, bound, pending, failed;
-    uint64_t last_report;
+    bool io_ok, io_eshutdown;
+    uint64_t last_report, enabled_at;
 };
 static volatile sig_atomic_t interrupted;
 
@@ -163,7 +168,7 @@ static int service(struct device *d, int timeout)
             }
             break;
         case FUNCTIONFS_ENABLE:
-            d->enabled = true;
+            d->enabled = true; d->enabled_at = now_ms();
             d->protocol = 1; d->idle = 0; d->leds = 0;
             switch_pad_report(d->pad_report, 0);
             fprintf(stderr, "USB composite (gamepad + keyboard) enabled\n"); break;
@@ -189,11 +194,13 @@ static int service(struct device *d, int timeout)
         long n = syscall(SYS_io_getevents, d->aio, 0L, 1L, &event, &zero);
         if (n != 1 || !d->pending) { fprintf(stderr, "invalid AIO completion\n"); return -1; }
         d->pending = false;
-        if (event.res != 8) {
+        d->io_ok = event.res == 8;
+        d->io_eshutdown = event.res == -ESHUTDOWN;
+        if (d->io_ok) d->last_report = now_ms();
+        else if (!d->io_eshutdown) {
             fprintf(stderr, "interrupt IN transfer failed: %lld\n", (long long)event.res);
             d->failed = true; return -1;
         }
-        d->last_report = now_ms();
     }
     return interrupted || d->failed ? -1 : 0;
 }
@@ -203,23 +210,33 @@ static int send_report(struct device *d, int fd, uint8_t stable[8], const uint8_
 {
     if (!d->enabled || d->pending || interrupted) return -1;
     memmove(stable, src, 8);
-    memset(&d->request, 0, sizeof(d->request));
-    d->request.aio_lio_opcode = IOCB_CMD_PWRITE;
-    d->request.aio_fildes = (uint32_t)fd;
-    d->request.aio_buf = (uint64_t)(uintptr_t)stable;
-    d->request.aio_nbytes = 8;
-    d->request.aio_flags = IOCB_FLAG_RESFD;
-    d->request.aio_resfd = (uint32_t)d->event;
-    struct iocb *requests[] = {&d->request};
-    if (syscall(SYS_io_submit, d->aio, 1L, requests) != 1) { perror("io_submit"); return -1; }
-    d->pending = true;
-    uint64_t deadline = now_ms() + IO_TIMEOUT_MS;
-    while (d->pending) {
-        uint64_t now = now_ms();
-        if (now >= deadline) { fprintf(stderr, "USB IN transfer timed out\n"); return -1; }
-        if (service(d, (int)(deadline - now))) return -1;
+    for (;;) {
+        memset(&d->request, 0, sizeof(d->request));
+        d->request.aio_lio_opcode = IOCB_CMD_PWRITE;
+        d->request.aio_fildes = (uint32_t)fd;
+        d->request.aio_buf = (uint64_t)(uintptr_t)stable;
+        d->request.aio_nbytes = 8;
+        d->request.aio_flags = IOCB_FLAG_RESFD;
+        d->request.aio_resfd = (uint32_t)d->event;
+        struct iocb *requests[] = {&d->request};
+        if (syscall(SYS_io_submit, d->aio, 1L, requests) != 1) { perror("io_submit"); return -1; }
+        d->pending = true;
+        uint64_t deadline = now_ms() + IO_TIMEOUT_MS;
+        while (d->pending) {
+            uint64_t now = now_ms();
+            if (now >= deadline) { fprintf(stderr, "USB IN transfer timed out\n"); return -1; }
+            if (service(d, (int)(deadline - now))) return -1;
+        }
+        if (d->io_ok) return 0;
+        /* ESHUTDOWN right after enable: the endpoint is still coming up. */
+        if (!d->io_eshutdown || now_ms() - d->enabled_at >= EP_SETTLE_MS) {
+            fprintf(stderr, "interrupt IN transfer failed: endpoint shut down\n");
+            return -1;
+        }
+        struct timespec nap = {0, EP_RETRY_MS * 1000000L};
+        nanosleep(&nap, NULL);
+        if (interrupted || !d->enabled) return -1;
     }
-    return 0;
 }
 
 static int hold(struct device *d, unsigned duration)

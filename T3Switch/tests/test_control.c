@@ -107,10 +107,11 @@ int main(void)
     assert(ffs_descriptors[4] == sizeof(ffs_descriptors));
     assert(ffs_descriptors[8] == (FUNCTIONFS_HAS_FS_DESC | FUNCTIONFS_HAS_HS_DESC));
     assert(ffs_descriptors[12] == 7); /* FS descriptor count */
-    assert(ffs_descriptors[73] == 7); /* HS descriptor count */
-    /* FS block begins at offset 16; HS block at 16 + 57 + 4 = 77. */
+    assert(ffs_descriptors[16] == 7); /* HS descriptor count */
+    /* Counts are grouped: header 12 + fs_count 4 + hs_count 4 = 20. FS block
+     * begins at offset 20; HS block at 20 + 57 = 77. */
     for (unsigned s2 = 0; s2 < 2; ++s2) {
-        const uint8_t *b = ffs_descriptors + (s2 ? 77 : 16);
+        const uint8_t *b = ffs_descriptors + (s2 ? 77 : 20);
         const uint8_t interval = s2 ? 4 : 1;
         const uint8_t *itf0 = b;
         assert(itf0[0] == 9 && itf0[1] == USB_DT_INTERFACE && itf0[2] == 0);
